@@ -22,8 +22,29 @@ public class ResultBotSender {
         System.out.println("--- Single Test Run Finished ---");
     }
 
-    private final ScheduledExecutorService scheduler = Executors.newScheduledThreadPool(1);
+    // Use a daemon thread factory for the scheduler
+    private final ScheduledExecutorService scheduler = Executors.newScheduledThreadPool(1, new ThreadFactory() {
+        @Override
+        public Thread newThread(Runnable r) {
+            Thread t = new Thread(r, "result-bot-scheduler");
+            t.setDaemon(true);
+            return t;
+        }
+    });
+
+    // Bounded, concurrent set for known results
     private final Set<String> knownResultsCache = ConcurrentHashMap.newKeySet();
+
+    // Optional executor to handle sending individual results without blocking
+    // scheduler
+    private final ExecutorService resultSenderExecutor = Executors.newFixedThreadPool(2, new ThreadFactory() {
+        @Override
+        public Thread newThread(Runnable r) {
+            Thread t = new Thread(r, "result-sender");
+            t.setDaemon(true);
+            return t;
+        }
+    });
 
     public ResultBotSender() {
         loadResultsFromStorage();
@@ -89,20 +110,19 @@ public class ResultBotSender {
                 System.out.println("Processing " + newResults.size() + " new results individually...");
 
                 for (RaceResult singleResult : newResults) {
-                    // Refactored to use dedicated Discord Messaging Client Utility
-                    DiscordWebhookClient.sendSingleResultToDiscord(webClient, singleResult);
+                    // Submit sending to separate executor so we don't block the scheduler thread
+                    resultSenderExecutor.submit(() -> {
+                        try {
+                            DiscordWebhookClient.sendSingleResultToDiscord(webClient, singleResult);
+                            knownResultsCache.add(singleResult.time() + "|" + singleResult.place());
+                            RaceResultPersistence.storeSingleResult(singleResult);
+                        } catch (Exception e) {
+                            System.err.println("Error sending/storing result: " + e.getMessage());
+                        }
+                    });
 
-                    knownResultsCache.add(singleResult.time() + "|" + singleResult.place());
-
-                    // Refactored to use dedicated File Persistence Manager
-                    RaceResultPersistence.storeSingleResult(singleResult);
-
-                    try {
-                        Thread.sleep(10000);
-                    } catch (InterruptedException ie) {
-                        Thread.currentThread().interrupt();
-                        break;
-                    }
+                    // If you require a pacing delay between sends, use scheduler.schedule with
+                    // increasing delay instead
                 }
 
                 // Triggers cache file pruning and returns the new memory mappings
@@ -132,18 +152,24 @@ public class ResultBotSender {
     }
 
     private boolean isWithinRacingHours() {
-        // Force evaluation using the UK/London time window explicitly
         java.time.ZonedDateTime ukTime = java.time.ZonedDateTime.now(java.time.ZoneId.of("Europe/London"));
         java.time.LocalTime currentTime = ukTime.toLocalTime();
 
         java.time.LocalTime startWindow = java.time.LocalTime.of(11, 0); // 11:00 AM
         java.time.LocalTime endWindow = java.time.LocalTime.of(21, 30); // 09:30 PM
 
-        // Returns true only if the clock sits squarely between 11:00 and 21:30
         return !currentTime.isBefore(startWindow) && !currentTime.isAfter(endWindow);
     }
 
     public void stop() {
-        scheduler.shutdown();
+        System.out.println("Stopping ResultBotSender scheduler and executors...");
+        try {
+            scheduler.shutdownNow();
+        } catch (Exception ignored) {
+        }
+        try {
+            resultSenderExecutor.shutdownNow();
+        } catch (Exception ignored) {
+        }
     }
 }

@@ -12,6 +12,7 @@ import java.util.Optional;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.ThreadFactory;
 
 import uk.co.pluckier.discordbot.filters.HorseAnalyzer;
 import uk.co.pluckier.discordbot.filters.RaceFilter;
@@ -23,7 +24,18 @@ import com.fasterxml.jackson.databind.JsonNode;
 
 public class DiscordWebhookSender {
 
-    private static final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
+    // Use a daemon-thread ScheduledExecutorService so threads don't keep JVM alive
+    // unexpectedly
+    private static final ScheduledExecutorService scheduler = Executors
+            .newSingleThreadScheduledExecutor(new ThreadFactory() {
+                @Override
+                public Thread newThread(Runnable r) {
+                    Thread t = new Thread(r, "discord-webhook-scheduler");
+                    t.setDaemon(true);
+                    return t;
+                }
+            });
+
     private static String lastAlertedRaceTime = "";
 
     private static LocalDate lastTrackingDate = LocalDate.MIN;
@@ -40,7 +52,7 @@ public class DiscordWebhookSender {
     public void startScheduler() {
         System.out.println("🏁 Automated Racing Engine Started with State-Driven Fixed Rate Loop!");
 
-        // FIX: Schedule exactly ONE recurring task. It never adds new tasks to the
+        // Schedule exactly ONE recurring task. It never adds new tasks to the
         // queue.
         scheduler.scheduleAtFixedRate(DiscordWebhookSender::executeEngineCycle, 0, 1, TimeUnit.MINUTES);
 
@@ -108,6 +120,14 @@ public class DiscordWebhookSender {
         } catch (Exception e) {
             System.err.println("❌ Error encountered in engine: " + e.getMessage() + ". Retrying in 5 mins.");
             setSmartSleepMinutes(5);
+        }
+    }
+
+    public void stop() {
+        System.out.println("Stopping DiscordWebhookSender scheduler and cleaning up...");
+        try {
+            scheduler.shutdownNow();
+        } catch (Exception ignored) {
         }
     }
 

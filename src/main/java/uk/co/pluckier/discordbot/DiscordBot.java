@@ -15,56 +15,66 @@ import uk.co.pluckier.discordbot.racedata.RaceDataManager;
 import uk.co.pluckier.discordbot.webhooks.DiscordWebhookSender;
 import uk.co.pluckier.discordbot.webhooks.ResultBotSender;
 
-
 public class DiscordBot {
 
-    //String message = "Hello";
     public static void main(String[] args) {
-        //var event = new BotMessageEvent();
-        //event.begin();
-        //event.message = "Hello event from Discord Bot";
-
-        // Initialize the bot here
         System.out.println("Discord Bot is starting...");
-    
+
         RaceDataManager data = new RaceDataManager();
         data.fetchTodaysRaces(); // Fetch and load today's races
-
-        //event.commit();
 
         try {
             MessageListener messageListener = new MessageListener(data);
 
-            JDABuilder builder = JDABuilder.createLight(ConfigLoader.getToken(), 
-                GatewayIntent.GUILD_MESSAGES, 
-                GatewayIntent.MESSAGE_CONTENT);
+            JDABuilder builder = JDABuilder.createLight(ConfigLoader.getToken(),
+                    GatewayIntent.GUILD_MESSAGES,
+                    GatewayIntent.MESSAGE_CONTENT);
 
             builder.disableCache(
-                CacheFlag.VOICE_STATE, 
-                CacheFlag.EMOJI, 
-                CacheFlag.STICKER, 
-                CacheFlag.CLIENT_STATUS, 
-                CacheFlag.ACTIVITY, 
-                CacheFlag.ONLINE_STATUS,
-                CacheFlag.MEMBER_OVERRIDES
-            );
+                    CacheFlag.VOICE_STATE,
+                    CacheFlag.EMOJI,
+                    CacheFlag.STICKER,
+                    CacheFlag.CLIENT_STATUS,
+                    CacheFlag.ACTIVITY,
+                    CacheFlag.ONLINE_STATUS,
+                    CacheFlag.MEMBER_OVERRIDES);
 
             // Tell JDA not to save user lists or profiles in your RAM
             builder.setChunkingFilter(ChunkingFilter.NONE);
             builder.setMemberCachePolicy(MemberCachePolicy.NONE);
 
-            // Your listener attachments...
-            JDA jda = builder.addEventListeners(messageListener)
-                    .addEventListeners(new RacingButtonListener(messageListener)) 
+            // Build JDA and keep reference so we can shutdown cleanly
+            final JDA jda = builder.addEventListeners(messageListener)
+                    .addEventListeners(new RacingButtonListener(messageListener))
                     .build();
 
-            // CRUCIAL: This blocks the main thread so the program doesn't exit
-            jda.awaitReady(); 
+            // Block until ready
+            jda.awaitReady();
 
-            DiscordWebhookSender webhookSender = new DiscordWebhookSender();
-            webhookSender.startScheduler(); 
-            ResultBotSender resultBotSender = new ResultBotSender();
+            // Start background schedulers and keep references
+            final DiscordWebhookSender webhookSender = new DiscordWebhookSender();
+            webhookSender.startScheduler();
+            final ResultBotSender resultBotSender = new ResultBotSender();
             resultBotSender.startScheduler();
+
+            // Add a JVM shutdown hook to clean up threads and JDA
+            Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+                System.out.println("🛑 Shutdown hook: stopping schedulers and JDA...");
+                try {
+                    webhookSender.stop();
+                } catch (Exception ignored) {
+                }
+                try {
+                    resultBotSender.stop();
+                } catch (Exception ignored) {
+                }
+                try {
+                    if (jda != null) {
+                        jda.shutdownNow();
+                    }
+                } catch (Exception ignored) {
+                }
+            }));
 
             System.out.println("Bot is successfully connected and online!");
 
