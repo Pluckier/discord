@@ -13,7 +13,8 @@ import uk.co.pluckier.discordbot.model.Position;
 /**
  * Helper for building and sending Discord webhook payloads.
  *
- * Note: For async sends from background threads we prefer using SharedHttpClient
+ * Note: For async sends from background threads we prefer using
+ * SharedHttpClient
  * (java.net.HttpClient) with a pre-built JSON payload to avoid capturing heavy
  * HtmlUnit WebClient instances in task runnables.
  */
@@ -69,36 +70,6 @@ public class DiscordWebhookClient {
                         detailsMarkdown);
 
         return jsonPayload;
-    }
-
-    /**
-     * Legacy method that used HtmlUnit to POST a payload. Prefer using the
-     * buildPayload + SharedHttpClient approach from background tasks so we do
-     * not capture HtmlUnit WebClient instances in queued runnables.
-     */
-    public static void sendSingleResultToDiscord(WebClient webClient, RaceResult result) {
-        // Keep existing implementation for ad-hoc synchronous usage, but prefer
-        // send via java.net.HttpClient for async tasks.
-        try {
-            WebRequest webRequest = new WebRequest(new java.net.URL(ConfigLoader.getWebhookURL()), HttpMethod.POST);
-            byte[] payloadBytes = buildPayload(result).getBytes(java.nio.charset.StandardCharsets.UTF_8);
-            webRequest.setRequestBody(new String(payloadBytes, java.nio.charset.StandardCharsets.ISO_8859_1));
-
-            webRequest.setAdditionalHeader("Content-Type", "application/json; charset=UTF-8");
-            webRequest.setAdditionalHeader("Accept", "application/json");
-
-            webClient.getOptions().setThrowExceptionOnFailingStatusCode(false);
-            WebResponse response = webClient.getPage(webRequest).getWebResponse();
-
-            if (response.getStatusCode() == 204 || response.getStatusCode() == 200) {
-                System.out.println("Dispatched webhook for result: " + result.time() + " " + result.place());
-            } else {
-                System.err.println("Discord rejected payload with status " + response.getStatusCode() + ": "
-                        + response.getContentAsString());
-            }
-        } catch (IOException e) {
-            System.err.println("Webhook transport failure for " + result.time() + ": " + e.getMessage());
-        }
     }
 
     private static String sanitizeJsonString(String input) {

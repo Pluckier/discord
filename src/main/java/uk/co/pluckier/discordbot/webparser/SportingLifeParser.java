@@ -19,6 +19,8 @@ public class SportingLifeParser {
 
         Elements raceContainers = doc.select("div.FastResultsList__FastResultCardContainer-sc-9e8caae5-1");
 
+        doc = null;
+
         for (Element container : raceContainers) {
             String checkText = container.text();
             if (!checkText.contains("Full Result")) {

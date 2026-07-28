@@ -6,6 +6,7 @@ import java.io.FileReader;
 import java.io.IOException;
 import java.util.*;
 import java.util.concurrent.*;
+import java.net.URI;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 
@@ -109,6 +110,8 @@ public class ResultBotSender {
             String url = ConfigLoader.getResultsURL();
             String pageHtml = webClient.getPage(url).getWebResponse().getContentAsString();
 
+            webClient.close();
+
             // Refactored to use dedicated Parser Class
             List<RaceResult> results = SportingLifeParser.parseRaceResults(pageHtml);
             System.out.println("Found " + results.size() + " total results on page.");
@@ -136,9 +139,11 @@ public class ResultBotSender {
                                     .sendAsync(req, HttpResponse.BodyHandlers.ofString())
                                     .thenAccept(response -> {
                                         if (response.statusCode() == 204 || response.statusCode() == 200) {
-                                            System.out.println("Dispatched webhook for result: " + singleResult.time() + " " + singleResult.place());
+                                            System.out.println("Dispatched webhook for result: " + singleResult.time()
+                                                    + " " + singleResult.place());
                                         } else {
-                                            System.err.println("Discord rejected payload with status " + response.statusCode());
+                                            System.err.println(
+                                                    "Discord rejected payload with status " + response.statusCode());
                                         }
                                     })
                                     .exceptionally(ex -> {
