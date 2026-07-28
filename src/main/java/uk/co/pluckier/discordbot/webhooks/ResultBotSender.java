@@ -6,12 +6,16 @@ import java.io.FileReader;
 import java.io.IOException;
 import java.util.*;
 import java.util.concurrent.*;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+
 import com.gargoylesoftware.htmlunit.*;
 
 import uk.co.pluckier.discordbot.webparser.SportingLifeParser;
 import uk.co.pluckier.discordbot.config.ConfigLoader;
 import uk.co.pluckier.discordbot.model.RaceResult;
 import uk.co.pluckier.discordbot.utils.RaceResultPersistence;
+import uk.co.pluckier.discordbot.utils.SharedHttpClient;
 
 public class ResultBotSender {
 
@@ -35,16 +39,22 @@ public class ResultBotSender {
     // Bounded, concurrent set for known results
     private final Set<String> knownResultsCache = ConcurrentHashMap.newKeySet();
 
-    // Optional executor to handle sending individual results without blocking
-    // scheduler
-    private final ExecutorService resultSenderExecutor = Executors.newFixedThreadPool(2, new ThreadFactory() {
-        @Override
-        public Thread newThread(Runnable r) {
-            Thread t = new Thread(r, "result-sender");
-            t.setDaemon(true);
-            return t;
-        }
-    });
+    // Executor to handle sending individual results without blocking scheduler
+    // Use a bounded queue to avoid unbounded accumulation and provide backpressure
+    private final ThreadPoolExecutor resultSenderExecutor = new ThreadPoolExecutor(
+            2, // core pool size
+            2, // max pool size
+            0L, TimeUnit.MILLISECONDS,
+            new ArrayBlockingQueue<>(200),
+            new ThreadFactory() {
+                @Override
+                public Thread newThread(Runnable r) {
+                    Thread t = new Thread(r, "result-sender");
+                    t.setDaemon(true);
+                    return t;
+                }
+            },
+            new ThreadPoolExecutor.CallerRunsPolicy());
 
     public ResultBotSender() {
         loadResultsFromStorage();
@@ -110,10 +120,33 @@ public class ResultBotSender {
                 System.out.println("Processing " + newResults.size() + " new results individually...");
 
                 for (RaceResult singleResult : newResults) {
-                    // Submit sending to separate executor so we don't block the scheduler thread
+                    // Build payload synchronously so we do NOT capture the heavy WebClient
+                    String payload = DiscordWebhookClient.buildPayload(singleResult);
+
+                    // Submit only the small payload to the executor; do not pass WebClient
                     resultSenderExecutor.submit(() -> {
                         try {
-                            DiscordWebhookClient.sendSingleResultToDiscord(webClient, singleResult);
+                            HttpRequest req = HttpRequest.newBuilder()
+                                    .uri(URI.create(ConfigLoader.getWebhookURL()))
+                                    .header("Content-Type", "application/json")
+                                    .POST(HttpRequest.BodyPublishers.ofString(payload))
+                                    .build();
+
+                            SharedHttpClient.getClient()
+                                    .sendAsync(req, HttpResponse.BodyHandlers.ofString())
+                                    .thenAccept(response -> {
+                                        if (response.statusCode() == 204 || response.statusCode() == 200) {
+                                            System.out.println("Dispatched webhook for result: " + singleResult.time() + " " + singleResult.place());
+                                        } else {
+                                            System.err.println("Discord rejected payload with status " + response.statusCode());
+                                        }
+                                    })
+                                    .exceptionally(ex -> {
+                                        System.err.println("Webhook send failure: " + ex.getMessage());
+                                        return null;
+                                    });
+
+                            // Update cache and persist (small strings)
                             knownResultsCache.add(singleResult.time() + "|" + singleResult.place());
                             RaceResultPersistence.storeSingleResult(singleResult);
                         } catch (Exception e) {
@@ -168,8 +201,13 @@ public class ResultBotSender {
         } catch (Exception ignored) {
         }
         try {
+            resultSenderExecutor.shutdown(); // allow tasks to finish
+            if (!resultSenderExecutor.awaitTermination(10, TimeUnit.SECONDS)) {
+                resultSenderExecutor.shutdownNow();
+            }
+        } catch (InterruptedException ie) {
             resultSenderExecutor.shutdownNow();
-        } catch (Exception ignored) {
+            Thread.currentThread().interrupt();
         }
     }
 }
