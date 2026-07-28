@@ -44,6 +44,10 @@ public class ConfigLoader {
         return properties.getProperty("webhook.url");
     }
 
+    public static String getResultsWebhookURL() {
+        return properties.getProperty("results.webhook.url");
+    }
+
     public static String getStorageFile() {
         return properties.getProperty("storage.file");
     }

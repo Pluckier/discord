@@ -53,7 +53,7 @@ public class DiscordWebhookClient {
                 {
                   "embeds": [
                     {
-                      "title": "🏇 New Fast Result: %s",
+                      "title": "🏇 New Result: %s",
                       "description": "⏱️ **Time:** %s\\n\\n🏆 **Standings:**\\n%s\\n\\n📋 **Race Details & Dividends:**\\n%s",
                       "color": 3066993,
                       "footer": {

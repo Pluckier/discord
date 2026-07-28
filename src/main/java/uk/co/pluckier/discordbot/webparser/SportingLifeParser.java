@@ -19,6 +19,7 @@ public class SportingLifeParser {
 
         Elements raceContainers = doc.select("div.FastResultsList__FastResultCardContainer-sc-9e8caae5-1");
 
+        doc.empty();
         doc = null;
 
         for (Element container : raceContainers) {

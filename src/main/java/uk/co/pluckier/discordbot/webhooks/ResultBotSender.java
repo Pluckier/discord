@@ -15,14 +15,19 @@ import com.gargoylesoftware.htmlunit.*;
 import uk.co.pluckier.discordbot.webparser.SportingLifeParser;
 import uk.co.pluckier.discordbot.config.ConfigLoader;
 import uk.co.pluckier.discordbot.model.RaceResult;
+import uk.co.pluckier.discordbot.racedata.RaceDataManager;
 import uk.co.pluckier.discordbot.utils.RaceResultPersistence;
 import uk.co.pluckier.discordbot.utils.SharedHttpClient;
 
 public class ResultBotSender {
 
+    private RaceDataManager data;
+
     public static void main(String[] args) {
         System.out.println("--- Starting Single Test Run ---");
-        ResultBotSender bot = new ResultBotSender();
+        RaceDataManager data = new RaceDataManager();
+        data.fetchTodaysRaces();
+        ResultBotSender bot = new ResultBotSender(data);
         bot.checkForNewResults();
         System.out.println("--- Single Test Run Finished ---");
     }
@@ -57,7 +62,8 @@ public class ResultBotSender {
             },
             new ThreadPoolExecutor.CallerRunsPolicy());
 
-    public ResultBotSender() {
+    public ResultBotSender(RaceDataManager data) {
+        this.data = data;
         loadResultsFromStorage();
         Runtime.getRuntime().addShutdownHook(new Thread(this::stop));
     }
@@ -94,7 +100,9 @@ public class ResultBotSender {
 
     private void checkForNewResults() {
         if (!isWithinRacingHours()) {
-            System.out.println("Skipping check. Current UK time is outside active racing hours (11:00 AM - 9:30 PM).");
+            System.out.println("Skipping check. Current UK time is outside active racing hours." +
+                    " First race at " + data.getFirstRaceTime().toString() + " " +
+                    " Last race at " + data.getLastRaceTime().toString());
             return;
         }
         BrowserVersion.BrowserVersionBuilder browserBuilder = new BrowserVersion.BrowserVersionBuilder(
@@ -105,11 +113,14 @@ public class ResultBotSender {
 
         try (WebClient webClient = new WebClient(customChrome)) {
             webClient.getOptions().setCssEnabled(false);
+            webClient.getOptions().setHistoryPageCacheLimit(0); // Stops storing old page snapshots in RAM
+            webClient.getOptions().setHistorySizeLimit(0);
             webClient.getOptions().setJavaScriptEnabled(false);
 
             String url = ConfigLoader.getResultsURL();
             String pageHtml = webClient.getPage(url).getWebResponse().getContentAsString();
 
+            webClient.getCache().clear();
             webClient.close();
 
             // Refactored to use dedicated Parser Class
@@ -130,7 +141,7 @@ public class ResultBotSender {
                     resultSenderExecutor.submit(() -> {
                         try {
                             HttpRequest req = HttpRequest.newBuilder()
-                                    .uri(URI.create(ConfigLoader.getWebhookURL()))
+                                    .uri(URI.create(ConfigLoader.getResultsWebhookURL()))
                                     .header("Content-Type", "application/json")
                                     .POST(HttpRequest.BodyPublishers.ofString(payload))
                                     .build();
@@ -193,8 +204,8 @@ public class ResultBotSender {
         java.time.ZonedDateTime ukTime = java.time.ZonedDateTime.now(java.time.ZoneId.of("Europe/London"));
         java.time.LocalTime currentTime = ukTime.toLocalTime();
 
-        java.time.LocalTime startWindow = java.time.LocalTime.of(11, 0); // 11:00 AM
-        java.time.LocalTime endWindow = java.time.LocalTime.of(21, 30); // 09:30 PM
+        java.time.LocalTime startWindow = data.getFirstRaceTime();
+        java.time.LocalTime endWindow = data.getLastRaceTime().plusMinutes(30);
 
         return !currentTime.isBefore(startWindow) && !currentTime.isAfter(endWindow);
     }

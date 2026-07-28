@@ -54,7 +54,7 @@ public class DiscordBot {
             // Start background schedulers and keep references
             final DiscordWebhookSender webhookSender = new DiscordWebhookSender();
             webhookSender.startScheduler();
-            final ResultBotSender resultBotSender = new ResultBotSender();
+            final ResultBotSender resultBotSender = new ResultBotSender(data);
             resultBotSender.startScheduler();
 
             // Add a JVM shutdown hook to clean up threads and JDA
