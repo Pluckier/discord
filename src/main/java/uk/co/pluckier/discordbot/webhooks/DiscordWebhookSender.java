@@ -12,6 +12,10 @@ import java.util.Optional;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import java.util.concurrent.ThreadFactory;
 
 import uk.co.pluckier.discordbot.filters.HorseAnalyzer;
@@ -23,6 +27,8 @@ import uk.co.pluckier.discordbot.config.ConfigLoader;
 import com.fasterxml.jackson.databind.JsonNode;
 
 public class DiscordWebhookSender {
+
+    private static final Logger log = LoggerFactory.getLogger(DiscordWebhookSender.class);
 
     // Use a daemon-thread ScheduledExecutorService so threads don't keep JVM alive
     // unexpectedly
@@ -38,6 +44,8 @@ public class DiscordWebhookSender {
 
     private static String lastAlertedRaceTime = "";
 
+    RaceDataManager data;
+
     private static LocalDate lastTrackingDate = LocalDate.MIN;
 
     // Memory fix: Use a primitive timestamp to calculate when it's safe to poll the
@@ -45,24 +53,30 @@ public class DiscordWebhookSender {
     private static long nextAllowedCheckTimeMillis = 0;
 
     public static void main(String[] args) {
-        DiscordWebhookSender program = new DiscordWebhookSender();
+        RaceDataManager data = new RaceDataManager();
+        data.fetchTodaysRaces();
+        DiscordWebhookSender program = new DiscordWebhookSender(data);
         program.startScheduler();
     }
 
+    public DiscordWebhookSender(RaceDataManager data) {
+        this.data = data;
+    }
+
     public void startScheduler() {
-        System.out.println("🏁 Automated Racing Engine Started with State-Driven Fixed Rate Loop!");
+        log.info("🏁 Automated Racing Engine Started with State-Driven Fixed Rate Loop!");
 
         // Schedule exactly ONE recurring task. It never adds new tasks to the
         // queue.
-        scheduler.scheduleAtFixedRate(DiscordWebhookSender::executeEngineCycle, 0, 1, TimeUnit.MINUTES);
+        scheduler.scheduleAtFixedRate(this::executeEngineCycle, 0, 1, TimeUnit.MINUTES);
 
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
-            System.out.println("🛑 Shutting down Automated Racing Engine scheduler pool cleanly...");
+            log.info("🛑 Shutting down Automated Racing Engine scheduler pool cleanly...");
             scheduler.shutdown();
         }));
     }
 
-    private static void executeEngineCycle() {
+    private void executeEngineCycle() {
         // Safe check: If we are in "smart sleep" mode, instantly exit.
         // No network calls made, no objects allocated, completely free.
         if (System.currentTimeMillis() < nextAllowedCheckTimeMillis) {
@@ -79,16 +93,14 @@ public class DiscordWebhookSender {
                 lastTrackingDate = today;
             }
 
-            System.out.println(now + " 🔄 Fetching fresh schedule data...");
-            RaceDataManager data = new RaceDataManager();
-            data.fetchTodaysRaces();
+            log.info(now + " 🔄 Fetching schedule data...");
             JsonNode rootNode = data.getRootNode();
-
             Optional<JsonNode> nextRace = RaceFilter.findNextRace(rootNode, now);
 
             if (nextRace.isEmpty()) {
-                System.out.println("📭 No more races found for today. Smart sleep for 1 hour...");
+                log.info("📭 No more races found for today. Smart sleep for 1 hour...");
                 setSmartSleepMinutes(60);
+                data.fetchTodaysRaces();
                 return;
             }
 
@@ -102,29 +114,32 @@ public class DiscordWebhookSender {
 
             if (minutesToSleep <= 0) {
                 if (!raceTimeStr.equals(lastAlertedRaceTime)) {
-                    System.out.printf("🚨 Race at %s is due! Firing alert now.\n", raceTimeStr);
+                    String msg = String.format("🚨 Race at %s is due! Firing alert now.\n", raceTimeStr);
+                    log.info(msg);
                     lastAlertedRaceTime = raceTimeStr;
                     sendRaceAlertPayload(raceNode, raceTimeStr, now);
+                    data.fetchTodaysRaces();
                 }
                 // Allow checking again next minute to clear the race window safely
-                setSmartSleepMinutes(0);
+                setSmartSleepMinutes(4);
             } else {
-                System.out.printf("💤 Next race at %s (%d mins away). Smart sleeping for %d minutes...\n",
+                String msg = String.format("💤 Next race at %s (%d mins away). Smart sleeping for %d minutes...\n",
                         raceTimeStr, minutesUntilRace, minutesToSleep);
+                log.info(msg);
                 setSmartSleepMinutes(minutesToSleep);
             }
 
         } catch (DateTimeParseException e) {
-            System.err.println("❌ Could not parse race time string. Retrying in 5 mins.");
+            log.error("❌ Could not parse race time string. Retrying in 5 mins.");
             setSmartSleepMinutes(5);
         } catch (Exception e) {
-            System.err.println("❌ Error encountered in engine: " + e.getMessage() + ". Retrying in 5 mins.");
+            log.error("❌ Error encountered in engine: " + e.getMessage() + ". Retrying in 5 mins.");
             setSmartSleepMinutes(5);
         }
     }
 
     public void stop() {
-        System.out.println("Stopping DiscordWebhookSender scheduler and cleaning up...");
+        log.info("Stopping DiscordWebhookSender scheduler and cleaning up...");
         try {
             scheduler.shutdownNow();
         } catch (Exception ignored) {
@@ -207,17 +222,17 @@ public class DiscordWebhookSender {
             SharedHttpClient.getClient().sendAsync(request, HttpResponse.BodyHandlers.ofString())
                     .thenAccept(response -> {
                         if (response.statusCode() != 204 && response.statusCode() != 200) {
-                            System.err.println("Discord Error Code: " + response.statusCode());
+                            log.error("Discord Error Code: " + response.statusCode());
                         } else {
-                            System.out.println("Success! Message sent to Discord.");
+                            log.info("Success! Message sent to Discord.");
                         }
                     })
                     .exceptionally(ex -> {
-                        System.err.println("Failed to send webhook: " + ex.getMessage());
+                        log.error("Failed to send webhook: " + ex.getMessage());
                         return null;
                     });
         } catch (Exception e) {
-            System.err.println("Error building request: " + e.getMessage());
+            log.error("Error building request: " + e.getMessage());
         }
     }
 }

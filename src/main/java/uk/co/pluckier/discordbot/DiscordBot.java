@@ -1,5 +1,8 @@
 package uk.co.pluckier.discordbot;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import net.dv8tion.jda.api.JDA;
 import net.dv8tion.jda.api.JDABuilder;
 import net.dv8tion.jda.api.requests.GatewayIntent;
@@ -17,8 +20,10 @@ import uk.co.pluckier.discordbot.webhooks.ResultBotSender;
 
 public class DiscordBot {
 
+    private static final Logger log = LoggerFactory.getLogger(DiscordBot.class);
+
     public static void main(String[] args) {
-        System.out.println("Discord Bot is starting...");
+        log.info("Discord Bot is starting...");
 
         RaceDataManager data = new RaceDataManager();
         data.fetchTodaysRaces(); // Fetch and load today's races
@@ -52,14 +57,14 @@ public class DiscordBot {
             jda.awaitReady();
 
             // Start background schedulers and keep references
-            final DiscordWebhookSender webhookSender = new DiscordWebhookSender();
+            final DiscordWebhookSender webhookSender = new DiscordWebhookSender(data);
             webhookSender.startScheduler();
             final ResultBotSender resultBotSender = new ResultBotSender(data);
             resultBotSender.startScheduler();
 
             // Add a JVM shutdown hook to clean up threads and JDA
             Runtime.getRuntime().addShutdownHook(new Thread(() -> {
-                System.out.println("🛑 Shutdown hook: stopping schedulers and JDA...");
+                log.info("🛑 Shutdown hook: stopping schedulers and JDA...");
                 try {
                     webhookSender.stop();
                 } catch (Exception ignored) {
@@ -76,13 +81,13 @@ public class DiscordBot {
                 }
             }));
 
-            System.out.println("Bot is successfully connected and online!");
+            log.info("Bot is successfully connected and online!");
 
         } catch (InterruptedException e) {
-            System.err.println("Bot startup was interrupted.");
+            log.error("Bot startup was interrupted.");
             Thread.currentThread().interrupt();
         } catch (Exception e) {
-            System.err.println("Failed to start the bot. Check your token!");
+            log.error("Failed to start the bot. Check your token!");
             e.printStackTrace();
         }
     }

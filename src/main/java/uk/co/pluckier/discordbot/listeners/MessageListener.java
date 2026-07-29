@@ -3,13 +3,12 @@ package uk.co.pluckier.discordbot.listeners;
 import net.dv8tion.jda.api.interactions.components.buttons.Button;
 import net.dv8tion.jda.api.interactions.components.ActionRow;
 import net.dv8tion.jda.api.utils.messages.MessageCreateData;
+import uk.co.pluckier.discordbot.RaceAnalysisFilter;
 import uk.co.pluckier.discordbot.config.ConfigLoader;
 import uk.co.pluckier.discordbot.filters.HorseAnalyzer;
 import uk.co.pluckier.discordbot.filters.RaceFilter;
-import uk.co.pluckier.discordbot.filters.HorseAnalyzer.HorsePrediction;
 import uk.co.pluckier.discordbot.racedata.RaceDataManager;
 import uk.co.pluckier.discordbot.racedata.RaceEmbedBuilder;
-import net.dv8tion.jda.api.interactions.components.buttons.Button;
 import net.dv8tion.jda.api.utils.messages.MessageCreateBuilder;
 import net.dv8tion.jda.api.entities.MessageEmbed;
 import net.dv8tion.jda.api.EmbedBuilder;
@@ -19,7 +18,6 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 
-import java.awt.Color;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalTime;
@@ -29,13 +27,19 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 /**
- * Main Discord message listener. Handles command routing and message processing.
+ * Main Discord message listener. Handles command routing and message
+ * processing.
  * Delegates heavy lifting to utility classes for better separation of concerns.
  */
 public class MessageListener extends ListenerAdapter {
 
-    //private static final String TARGET_CHANNEL_ID = "1527431734889807952";
+    private static final Logger log = LoggerFactory.getLogger(MessageListener.class);
+
+    // private static final String TARGET_CHANNEL_ID = "1527431734889807952";
 
     private final RaceDataManager data;
     private LocalDate lastFetchedDate;
@@ -48,7 +52,8 @@ public class MessageListener extends ListenerAdapter {
     @Override
     public void onMessageReceived(MessageReceivedEvent event) {
         // Ignore messages sent by bots to avoid infinite loops
-        if (event.getAuthor().isBot()) return;
+        if (event.getAuthor().isBot())
+            return;
 
         // Only respond in the target channel
         if (!event.getChannel().getId().equals(ConfigLoader.getChannelId())) {
@@ -70,9 +75,9 @@ public class MessageListener extends ListenerAdapter {
     private void reloadRaceDataIfNewDay() {
         LocalDate today = LocalDate.now(ZoneId.of("Europe/London"));
         if (!today.equals(lastFetchedDate)) {
-            System.out.println("New day detected! Reloading race data...");
-            data.fetchTodaysRaces();
-            
+            log.info("New day detected! Reloading race data...");
+            data.forceFetchTodaysRaces();
+
             // Guard: Only advance tracking date if data was successfully fetched
             if (data.getRootNode() != null) {
                 this.lastFetchedDate = today;
@@ -84,8 +89,19 @@ public class MessageListener extends ListenerAdapter {
      * Route message to appropriate command handler
      */
     private void routeCommand(String message, MessageReceivedEvent event) {
+        data.fetchTodaysRaces();
         if (message.equalsIgnoreCase("!winner")) {
             event.getChannel().sendMessageEmbeds(getNextRaceWinnerEmbed()).queue();
+        } else if (message.equalsIgnoreCase("!values")) {
+            event.getChannel().sendMessageEmbeds(processTipsters()).queue();
+        } else if (message.matches("^!values\\d+$")) {
+            int odds = Integer.parseInt(message.substring(7));
+            event.getChannel().sendMessageEmbeds(processTipsters(odds)).queue();
+        } else if (message.equalsIgnoreCase("!value")) {
+            event.getChannel().sendMessageEmbeds(processTipster()).queue();
+        } else if (message.matches("^!value\\d+$")) {
+            int odds = Integer.parseInt(message.substring(6));
+            event.getChannel().sendMessageEmbeds(processTipster(odds)).queue();
         } else if (message.equalsIgnoreCase("!site")) {
             event.getChannel().sendMessage("https://pluckier.github.io/racing 🏇").queue();
         } else if (message.equalsIgnoreCase("!tips")) {
@@ -108,6 +124,31 @@ public class MessageListener extends ListenerAdapter {
         }
     }
 
+    public MessageEmbed processTipster(int odds) {
+        RaceAnalysisFilter analysisFilter = new RaceAnalysisFilter(data);
+        MessageEmbed filteredResults = analysisFilter.analyzeSingleRace(odds);
+        return filteredResults;
+    }
+
+    public MessageEmbed processTipster() {
+        RaceAnalysisFilter analysisFilter = new RaceAnalysisFilter(data);
+        MessageEmbed filteredResults = analysisFilter.analyzeSingleRace(10);
+        return filteredResults;
+    }
+
+    public MessageEmbed processTipsters(int odds) {
+        RaceAnalysisFilter analysisFilter = new RaceAnalysisFilter(data);
+        MessageEmbed filteredResults = analysisFilter.analyzeRaces(odds);
+
+        return filteredResults;
+    }
+
+    public MessageEmbed processTipsters() {
+        RaceAnalysisFilter analysisFilter = new RaceAnalysisFilter(data);
+        MessageEmbed filteredResults = analysisFilter.analyzeRaces(10);
+        return filteredResults;
+    }
+
     public MessageEmbed findRacesWithExperiencedFields() {
         List<JsonNode> qualifyingRaces = new ArrayList<>();
 
@@ -117,7 +158,7 @@ public class MessageListener extends ListenerAdapter {
         // Loop through every race in the dataset
         for (JsonNode raceNode : racesNode) {
             JsonNode horsesNode = raceNode.path("horses");
-            
+
             // Skip races that have no horses listed yet
             if (!horsesNode.isArray() || horsesNode.isEmpty()) {
                 continue;
@@ -128,7 +169,7 @@ public class MessageListener extends ListenerAdapter {
             // Check every single runner inside this race
             for (JsonNode horseNode : horsesNode) {
                 JsonNode pastRacesNode = horseNode.path("past");
-                
+
                 // Get the count of past runs (array size). Treats missing/non-arrays as 0.
                 int pastRunCount = pastRacesNode.isArray() ? pastRacesNode.size() : 0;
 
@@ -150,22 +191,20 @@ public class MessageListener extends ListenerAdapter {
         return getTodaysRacesEmbed(qualifyingRacesNode);
     }
 
-
-    private MessageCreateBuilder getButtonsOn(){
+    private MessageCreateBuilder getButtonsOn() {
         // 1. Create the visual layout
         EmbedBuilder embed = new EmbedBuilder()
-            .setTitle("🏁 RACECARD: Leopardstown - 15:30")
-            .setDescription("Select a runner below to view deep form analysis.")
-            .setColor(0x24FEDB); // Dark green
+                .setTitle("🏁 RACECARD: Leopardstown - 15:30")
+                .setDescription("Select a runner below to view deep form analysis.")
+                .setColor(0x24FEDB); // Dark green
 
         // 2. Attach interactive buttons underneath the card
         MessageCreateBuilder message = new MessageCreateBuilder()
-            .setEmbeds(embed.build())
-            .addActionRow(
-                Button.primary("btn_horse_1", "1. Galopin Des Champs"),
-                Button.primary("btn_horse_2", "2. Fastorslow"),
-                Button.secondary("btn_refresh", "🔄 Refresh Odds")
-            );
+                .setEmbeds(embed.build())
+                .addActionRow(
+                        Button.primary("btn_horse_1", "1. Galopin Des Champs"),
+                        Button.primary("btn_horse_2", "2. Fastorslow"),
+                        Button.secondary("btn_refresh", "🔄 Refresh Odds"));
 
         return message;
     }
@@ -174,19 +213,19 @@ public class MessageListener extends ListenerAdapter {
         try {
             // Parse the "14:45" string into a LocalTime object
             LocalTime parsedTime = LocalTime.parse(raceTimeStr);
-            
+
             // Pass the parsed time into your existing logic
             return getNextRaceEmbeds(parsedTime);
-            
+
         } catch (DateTimeParseException e) {
             // Fallback embed if the string format is invalid or corrupted
             List<MessageEmbed> errorEmbeds = new ArrayList<>();
             EmbedBuilder errorEmbed = new EmbedBuilder()
-                .setTitle("❌ Invalid Time Format")
-                .setDescription("Could not parse the provided race time: " + raceTimeStr)
-                .setColor(0xE74C3C);
+                    .setTitle("❌ Invalid Time Format")
+                    .setDescription("Could not parse the provided race time: " + raceTimeStr)
+                    .setColor(0xE74C3C);
             errorEmbeds.add(errorEmbed.build());
-            
+
             return new MessageCreateBuilder().setEmbeds(errorEmbeds).build();
         }
     }
@@ -198,12 +237,12 @@ public class MessageListener extends ListenerAdapter {
         List<MessageEmbed> embeds = new ArrayList<>();
         JsonNode rootNode = data.getRootNode();
         Optional<JsonNode> nextRace = RaceFilter.findNextRace(rootNode, now);
-        
+
         if (nextRace.isEmpty()) {
             EmbedBuilder errorEmbed = new EmbedBuilder()
-                .setTitle("❌ No Races Found")
-                .setDescription("There are no upcoming races scheduled for today.")
-                .setColor(0xE74C3C);
+                    .setTitle("❌ No Races Found")
+                    .setDescription("There are no upcoming races scheduled for today.")
+                    .setColor(0xE74C3C);
             embeds.add(errorEmbed.build());
             return new MessageCreateBuilder().setEmbeds(embeds).build();
         }
@@ -212,13 +251,13 @@ public class MessageListener extends ListenerAdapter {
         String raceTime = raceNode.path("time").asText("Unknown Time");
         String raceName = raceNode.path("place").asText("Unknown Location");
         String going = raceNode.path("going").asText("Not Specified");
-        
+
         // 1. Primary Overview Card
         EmbedBuilder mainEmbed = new EmbedBuilder()
-            .setTitle("🏇 Upcoming Race: " + raceName)
-            .setColor(0x2ECC71)
-            .addField("🕒 Post Time", raceTime, true)
-            .addField("🌱 Going", going, true);
+                .setTitle("🏇 Upcoming Race: " + raceName)
+                .setColor(0x2ECC71)
+                .addField("🕒 Post Time", raceTime, true)
+                .addField("🌱 Going", going, true);
         embeds.add(mainEmbed.build());
 
         // 2. Horse Silk Cards List
@@ -232,28 +271,28 @@ public class MessageListener extends ListenerAdapter {
                 String jockey = runner.path("jockey").asText(null);
                 String odds = HorseAnalyzer.getCurrentOdds(HorseAnalyzer.extractOddsList(runner.path("odds")));
 
-                
                 EmbedBuilder horseEmbed = new EmbedBuilder()
-                    .setColor(0x3498DB); // Light blue accent for the runner list cards
-                    
+                        .setColor(0x3498DB); // Light blue accent for the runner list cards
 
-                //horseEmbed.setTitle(horseNumber + ". " + horseName);
-                //horseEmbed.setDescription(horseNumber + ". d " + horseName);
+                // horseEmbed.setTitle(horseNumber + ". " + horseName);
+                // horseEmbed.setDescription(horseNumber + ". d " + horseName);
                 if (silkUrl != null && !silkUrl.isEmpty()) {
-                // Arguments: setAuthor(textLabel, clickableLinkUrl, iconImageUrl)
-                    horseEmbed.setFooter(horseNumber + ". " + horseName + " -- " + odds + " -- " + trainer + "/" + jockey, silkUrl);
+                    // Arguments: setAuthor(textLabel, clickableLinkUrl, iconImageUrl)
+                    horseEmbed.setFooter(
+                            horseNumber + ". " + horseName + " -- " + odds + " -- " + trainer + "/" + jockey, silkUrl);
                 } else {
                     // Fallback text if the horse has no silk image data available
                     horseEmbed.setTitle(horseNumber + ". " + horseName);
                 }
-                if(embeds.size() < 10){
+                if (embeds.size() < 10) {
                     embeds.add(horseEmbed.build());
                 }
             }
         }
 
         // 3. Create Navigation Buttons
-        // We pass the current race's time string in the ID so our button listener knows where we are
+        // We pass the current race's time string in the ID so our button listener knows
+        // where we are
         Button prevButton = Button.primary("prev:" + raceTime, "⏮️ Previous Race");
         Button nextButton = Button.primary("next:" + raceTime, "Next Race ⏭️");
 
@@ -262,23 +301,22 @@ public class MessageListener extends ListenerAdapter {
                 .setEmbeds(embeds)
                 .setComponents(ActionRow.of(prevButton, nextButton))
                 .build();
-        
+
     }
 
-
-    private MessageEmbed getSpecial(){
+    private MessageEmbed getSpecial() {
 
         EmbedBuilder mainEmbed = new EmbedBuilder()
-        .setColor(0x0099ff)
-	    .setTitle("Some title")
-	    //.setURL("https://discord.js.org/")
-	    .setAuthor("Some name", "https://i.imgur.com/AfFp7pu.png", "https://discord.js.org")
-	    .setDescription("Some description here")
-	    .setThumbnail("https://i.imgur.com/AfFp7pu.png")
-        .addField("Fa","Fb", true)
-	    .setImage("https://i.imgur.com/AfFp7pu.png")
-        .setTimestamp(Instant.now())
-	    .setFooter("Some footer text here", "https://i.imgur.com/AfFp7pu.png" );
+                .setColor(0x0099ff)
+                .setTitle("Some title")
+                // .setURL("https://discord.js.org/")
+                .setAuthor("Some name", "https://i.imgur.com/AfFp7pu.png", "https://discord.js.org")
+                .setDescription("Some description here")
+                .setThumbnail("https://i.imgur.com/AfFp7pu.png")
+                .addField("Fa", "Fb", true)
+                .setImage("https://i.imgur.com/AfFp7pu.png")
+                .setTimestamp(Instant.now())
+                .setFooter("Some footer text here", "https://i.imgur.com/AfFp7pu.png");
 
         return mainEmbed.build();
     }
@@ -286,13 +324,13 @@ public class MessageListener extends ListenerAdapter {
     public static JsonNode convertListToJsonNode(List<JsonNode> list) {
         // Directly pull the global node factory without creating an ObjectMapper
         ArrayNode arrayNode = JsonNodeFactory.instance.arrayNode();
-        
+
         // Add items
         for (JsonNode node : list) {
             arrayNode.add(node);
         }
-        
-        return arrayNode; 
+
+        return arrayNode;
     }
 
     /**
@@ -362,7 +400,8 @@ public class MessageListener extends ListenerAdapter {
 
         for (JsonNode horse : horsesNode) {
             HorseAnalyzer.HorsePrediction prediction = HorseAnalyzer.analyzeHorse(horse);
-            if (prediction == null) continue;
+            if (prediction == null)
+                continue;
 
             // Track best historical rating
             if (bestHistorical == null || prediction.highestRating() > bestHistorical.highestRating()) {
@@ -377,7 +416,8 @@ public class MessageListener extends ListenerAdapter {
             }
         }
 
-        return RaceEmbedBuilder.buildNextRaceWinnerEmbed(raceTimeStr, racePlaceStr, favouriteHorse, bestHistorical, bestFirst3);
+        return RaceEmbedBuilder.buildNextRaceWinnerEmbed(raceTimeStr, racePlaceStr, favouriteHorse, bestHistorical,
+                bestFirst3);
     }
 
     /**
@@ -406,7 +446,8 @@ public class MessageListener extends ListenerAdapter {
 
             for (JsonNode horse : horsesNode) {
                 HorseAnalyzer.HorsePrediction prediction = HorseAnalyzer.analyzeHorse(horse);
-                if (prediction == null) continue;
+                if (prediction == null)
+                    continue;
 
                 if (bestHorse == null || prediction.highestRating() > bestHorse.highestRating()) {
                     bestHorse = prediction;
@@ -415,10 +456,9 @@ public class MessageListener extends ListenerAdapter {
 
             if (bestHorse != null) {
                 embed.addField(
-                    "⏰ " + raceTimeStr + " - " + racePlace,
-                    "🐎 **" + bestHorse.name() + "** — Current Odds: `" + bestHorse.currentOdds() + "`",
-                    false
-                );
+                        "⏰ " + raceTimeStr + " - " + racePlace,
+                        "🐎 **" + bestHorse.name() + "** — Current Odds: `" + bestHorse.currentOdds() + "`",
+                        false);
             }
         }
 

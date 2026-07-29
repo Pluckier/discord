@@ -2,7 +2,6 @@ package uk.co.pluckier.discordbot.webparser;
 
 import java.util.ArrayList;
 import java.util.List;
-import org.jsoup.Jsoup;
 import org.jsoup.nodes.Document;
 import org.jsoup.nodes.Element;
 import org.jsoup.select.Elements;
@@ -13,14 +12,14 @@ import uk.co.pluckier.discordbot.model.ResultDetails;
 
 public class SportingLifeParser {
 
-    public static List<RaceResult> parseRaceResults(String html) {
+    public static List<RaceResult> parseRaceResults(Document doc) {
         List<RaceResult> results = new ArrayList<>();
-        Document doc = Jsoup.parse(html);
+
+        if (doc == null) {
+            return results;
+        }
 
         Elements raceContainers = doc.select("div.FastResultsList__FastResultCardContainer-sc-9e8caae5-1");
-
-        doc.empty();
-        doc = null;
 
         for (Element container : raceContainers) {
             String checkText = container.text();
@@ -43,20 +42,17 @@ public class SportingLifeParser {
                 String horseName = (nameEl != null) ? nameEl.text().trim() : "";
                 String odds = (oddsEl != null) ? oddsEl.text().trim() : "";
 
-                // Only add if we managed to parse at least a horse name
                 if (!horseName.isEmpty()) {
                     positionsList.add(new Position(position, number, horseName, odds));
                 }
             }
 
-            // 2. FIXED: Parse Extra Metadata pairing the Label with its corresponding Value
+            // 2. Parse Extra Metadata
             List<String> extraDetailsList = new ArrayList<>();
             Elements detailLabels = container.select("td.FastResultDetailItem__ItemLabel-sc-55408ced-0");
 
             for (Element labelEl : detailLabels) {
                 String labelText = labelEl.text().trim();
-
-                // Find the parent table row to get the matching value element cell next to it
                 Element parentRow = labelEl.parent();
                 String valueText = "";
 
@@ -67,7 +63,6 @@ public class SportingLifeParser {
                     }
                 }
 
-                // Combine them cleanly if a value cell exists
                 if (!labelText.isEmpty()) {
                     if (!valueText.isEmpty()) {
                         extraDetailsList.add(labelText + " " + valueText);
@@ -77,28 +72,29 @@ public class SportingLifeParser {
                 }
             }
 
-            // Instantiate the bundled metadata block
             ResultDetails details = new ResultDetails(positionsList, extraDetailsList);
 
-            // 3. Parse Header Time and Place info
-            Elements placeAndTimes = container.select("span.FastResultCard__HeaderTimeCourseText-sc-4ab88fff-3");
-
-            for (Element placeAndTime : placeAndTimes) {
+            // 3. FIX: Target ONLY the single primary header element instead of a loop
+            Element placeAndTime = container.selectFirst("span.FastResultCard__HeaderTimeCourseText-sc-4ab88fff-3");
+            if (placeAndTime != null) {
                 Element timeElement = placeAndTime.selectFirst("span.time-short");
                 String time = (timeElement != null) ? timeElement.text().trim() : "";
 
-                Element placeElementCopy = placeAndTime.clone();
-                Element timeInCopy = placeElementCopy.selectFirst("span.time-short");
-                if (timeInCopy != null) {
-                    timeInCopy.remove();
-                }
-                String place = placeElementCopy.text().trim();
+                // ownText() reads text from 'placeAndTime' but IGNORES the child
+                // 'span.time-short'
+                // This perfectly extracts "Newton Abbot" without risking any corrupt
+                // replacements!
+                String place = placeAndTime.ownText().trim();
 
                 if (!place.isEmpty() && !time.isEmpty()) {
                     results.add(new RaceResult(place, time, details));
                 }
             }
         }
+
+        // REMOVED: doc.empty() and container.remove().
+        // When this method ends, 'doc' becomes unreferenced and the GC wipes it
+        // instantly.
         return results;
     }
 }

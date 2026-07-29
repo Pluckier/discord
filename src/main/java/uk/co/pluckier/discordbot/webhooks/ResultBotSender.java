@@ -6,40 +6,47 @@ import java.io.FileReader;
 import java.io.IOException;
 import java.util.*;
 import java.util.concurrent.*;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import java.net.URI;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
-
-import com.gargoylesoftware.htmlunit.*;
+import java.time.Duration;
+import java.time.LocalTime;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
 
 import uk.co.pluckier.discordbot.webparser.SportingLifeParser;
+import uk.co.pluckier.discordbot.DiscordBot;
 import uk.co.pluckier.discordbot.config.ConfigLoader;
 import uk.co.pluckier.discordbot.model.RaceResult;
 import uk.co.pluckier.discordbot.racedata.RaceDataManager;
 import uk.co.pluckier.discordbot.utils.RaceResultPersistence;
 import uk.co.pluckier.discordbot.utils.SharedHttpClient;
+import uk.co.pluckier.discordbot.utils.Utils;
 
 public class ResultBotSender {
 
+    private static final Logger log = LoggerFactory.getLogger(ResultBotSender.class);
     private RaceDataManager data;
+    private ScheduledFuture<?> future;
 
     public static void main(String[] args) {
-        System.out.println("--- Starting Single Test Run ---");
+        log.info("--- Starting Single Test Run ---");
         RaceDataManager data = new RaceDataManager();
         data.fetchTodaysRaces();
         ResultBotSender bot = new ResultBotSender(data);
         bot.checkForNewResults();
-        System.out.println("--- Single Test Run Finished ---");
+        log.info("--- Single Test Run Finished ---");
     }
 
-    // Use a daemon thread factory for the scheduler
-    private final ScheduledExecutorService scheduler = Executors.newScheduledThreadPool(1, new ThreadFactory() {
-        @Override
-        public Thread newThread(Runnable r) {
-            Thread t = new Thread(r, "result-bot-scheduler");
-            t.setDaemon(true);
-            return t;
-        }
+    private final ScheduledThreadPoolExecutor scheduler = (ScheduledThreadPoolExecutor) Executors.newScheduledThreadPool(1, r -> {
+        // 2. Sleek Java 25 Lambda syntax replaces the anonymous inner class block
+        Thread t = new Thread(r, "result-bot-scheduler");
+        t.setDaemon(true);
+        return t;
     });
 
     // Bounded, concurrent set for known results
@@ -48,8 +55,8 @@ public class ResultBotSender {
     // Executor to handle sending individual results without blocking scheduler
     // Use a bounded queue to avoid unbounded accumulation and provide backpressure
     private final ThreadPoolExecutor resultSenderExecutor = new ThreadPoolExecutor(
-            2, // core pool size
-            2, // max pool size
+            1, // core pool size
+            1, // max pool size
             0L, TimeUnit.MILLISECONDS,
             new ArrayBlockingQueue<>(200),
             new ThreadFactory() {
@@ -64,18 +71,18 @@ public class ResultBotSender {
 
     public ResultBotSender(RaceDataManager data) {
         this.data = data;
-        loadResultsFromStorage();
+        this.scheduler.setRemoveOnCancelPolicy(true);
         Runtime.getRuntime().addShutdownHook(new Thread(this::stop));
     }
 
     private void loadResultsFromStorage() {
         File file = new File(ConfigLoader.getStorageFile());
         if (!file.exists()) {
-            System.out.println("No local history file found. Starting with an empty cache.");
+            log.info("No local history file found. Starting with an empty cache.");
             return;
         }
 
-        System.out.println("Loading historical results from " + ConfigLoader.getStorageFile() + "...");
+        log.info("Loading historical results from " + ConfigLoader.getStorageFile() + "...");
         int loadedCount = 0;
 
         try (BufferedReader reader = new BufferedReader(new FileReader(file))) {
@@ -87,131 +94,171 @@ public class ResultBotSender {
                     loadedCount++;
                 }
             }
-            System.out.println("Successfully restored " + loadedCount + " past results into memory cache.");
+            log.info("Successfully restored " + loadedCount + " past results into memory cache.");
         } catch (IOException e) {
-            System.err.println("Failed to read history storage file: " + e.getMessage());
+            log.error("Failed to read history storage file: " + e.getMessage());
         }
     }
 
-    public void startScheduler() {
-        scheduler.scheduleAtFixedRate(this::checkForNewResults, 0, 5, TimeUnit.MINUTES);
-        System.out.println("ResultBotSender started. Checking for new results every 5 minutes.");
+        public void startScheduler() {
+        long initialDelay = 0;
+        LocalTime now = LocalTime.now(ZoneId.of("Europe/London"));
+
+        if (!Utils.isWithinRacingHours(data)) {
+            LocalTime nextRace = data.getNextRaceTime();
+            LocalTime lastRace = data.getLastRaceTime();
+
+            // SIMPLE CHECK: If next and last race times match, today's racing is finished
+            if (nextRace.equals(lastRace) && now.isAfter(lastRace.plusMinutes(30))) {
+                // Sleep until 11:00 AM tomorrow morning
+                LocalTime sevenAM = LocalTime.of(11, 0);
+                long minutesUntilTomorrowSevenAM = Duration.between(now, LocalTime.MAX).toMinutes()
+                        + Duration.between(LocalTime.MIN, sevenAM).toMinutes();
+                initialDelay = minutesUntilTomorrowSevenAM;
+
+                log.info("Racing finished for today. Sleeping for " + initialDelay
+                        + " minutes until 11:00 AM tomorrow.");
+            } else {
+                // Racing hasn't started yet today. Wait until 1 minute after the first race expected time.
+                LocalTime expectedResultTime = nextRace.plusMinutes(1);
+                long minutesToWait = Duration.between(now, expectedResultTime).toMinutes();
+                initialDelay = Math.max(0, minutesToWait);
+
+                log.info("Waiting " + initialDelay + " minutes until the first result is expected ("
+                        + expectedResultTime + ").");
+            }
+        }
+
+        // Cancel any lingering task execution references safely before spinning up a new one
+        if (this.future != null && !this.future.isDone()) {
+            this.future.cancel(false);
+        }
+        this.scheduler.purge(); // Instantly wipe references to help Generational ZGC
+
+        future = scheduler.scheduleAtFixedRate(this::checkForNewResults, initialDelay, 5, TimeUnit.MINUTES);
+        log.info("ResultBotSender started. Active check interval is set to 5 minutes after initial delay of " + initialDelay + " minutes.");
     }
 
     private void checkForNewResults() {
-        if (!isWithinRacingHours()) {
-            System.out.println("Skipping check. Current UK time is outside active racing hours." +
+        LocalTime now = LocalTime.now(ZoneId.of("Europe/London"));
+
+        if (!Utils.isWithinRacingHours(data)) {
+            LocalTime nextRace = data.getNextRaceTime();
+            LocalTime lastRace = data.getLastRaceTime();
+
+            // 🔥 TARGETED RESET TRIGGER: Detect if racing is completed for the day
+            if (nextRace.equals(lastRace) && now.isAfter(lastRace.plusMinutes(30))) {
+                log.info("🏁 Racing has concluded for the day. Initiating scheduler reset routine...");
+                
+                // 🔥 THE LIVE DEADBOCK FIREWALL: Use an independent worker task thread 
+                // to kill and reschedule this execution loop from the outside.
+                scheduler.execute(this::startScheduler);
+                return; 
+            }
+
+            log.info("Skipping check. Current UK time is outside active racing hours." +
                     " First race at " + data.getFirstRaceTime().toString() + " " +
                     " Last race at " + data.getLastRaceTime().toString());
             return;
         }
-        BrowserVersion.BrowserVersionBuilder browserBuilder = new BrowserVersion.BrowserVersionBuilder(
-                BrowserVersion.CHROME);
-        browserBuilder.setUserAgent(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36");
-        BrowserVersion customChrome = browserBuilder.build();
 
-        try (WebClient webClient = new WebClient(customChrome)) {
-            webClient.getOptions().setCssEnabled(false);
-            webClient.getOptions().setHistoryPageCacheLimit(0); // Stops storing old page snapshots in RAM
-            webClient.getOptions().setHistorySizeLimit(0);
-            webClient.getOptions().setJavaScriptEnabled(false);
-
+        org.jsoup.nodes.Document doc = null;
+        try {
             String url = ConfigLoader.getResultsURL();
-            String pageHtml = webClient.getPage(url).getWebResponse().getContentAsString();
 
-            webClient.getCache().clear();
-            webClient.close();
+            doc = org.jsoup.Jsoup.connect(url)
+                    .userAgent(
+                            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
+                    .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9")
+                    .timeout(15000) 
+                    .get();
 
-            // Refactored to use dedicated Parser Class
-            List<RaceResult> results = SportingLifeParser.parseRaceResults(pageHtml);
-            System.out.println("Found " + results.size() + " total results on page.");
+            List<RaceResult> results = SportingLifeParser.parseRaceResults(doc);
+            log.info("Found " + results.size() + " total results on page.");
 
-            List<RaceResult> newResults = filterNewResults(results);
-            System.out.println("Found " + newResults.size() + " genuine new results.");
+            loadResultsFromStorage();
+            List<RaceResult> newResults = Utils.filterNewResults(results, knownResultsCache);
+            log.info("Found " + newResults.size() + " genuine new results.");
 
             if (!newResults.isEmpty()) {
-                System.out.println("Processing " + newResults.size() + " new results individually...");
-
-                for (RaceResult singleResult : newResults) {
-                    // Build payload synchronously so we do NOT capture the heavy WebClient
-                    String payload = DiscordWebhookClient.buildPayload(singleResult);
-
-                    // Submit only the small payload to the executor; do not pass WebClient
-                    resultSenderExecutor.submit(() -> {
-                        try {
-                            HttpRequest req = HttpRequest.newBuilder()
-                                    .uri(URI.create(ConfigLoader.getResultsWebhookURL()))
-                                    .header("Content-Type", "application/json")
-                                    .POST(HttpRequest.BodyPublishers.ofString(payload))
-                                    .build();
-
-                            SharedHttpClient.getClient()
-                                    .sendAsync(req, HttpResponse.BodyHandlers.ofString())
-                                    .thenAccept(response -> {
-                                        if (response.statusCode() == 204 || response.statusCode() == 200) {
-                                            System.out.println("Dispatched webhook for result: " + singleResult.time()
-                                                    + " " + singleResult.place());
-                                        } else {
-                                            System.err.println(
-                                                    "Discord rejected payload with status " + response.statusCode());
-                                        }
-                                    })
-                                    .exceptionally(ex -> {
-                                        System.err.println("Webhook send failure: " + ex.getMessage());
-                                        return null;
-                                    });
-
-                            // Update cache and persist (small strings)
-                            knownResultsCache.add(singleResult.time() + "|" + singleResult.place());
-                            RaceResultPersistence.storeSingleResult(singleResult);
-                        } catch (Exception e) {
-                            System.err.println("Error sending/storing result: " + e.getMessage());
-                        }
-                    });
-
-                    // If you require a pacing delay between sends, use scheduler.schedule with
-                    // increasing delay instead
-                }
-
-                // Triggers cache file pruning and returns the new memory mappings
-                Set<String> synchronizedCache = RaceResultPersistence.pruneStorageFile();
-                if (synchronizedCache != null) {
-                    knownResultsCache.clear();
-                    knownResultsCache.addAll(synchronizedCache);
-                }
+                processResults(newResults);
             } else {
-                System.out.println("No new results found.");
+                log.info("No new results found.");
             }
         } catch (Exception e) {
-            System.err.println("Error tracking results: " + e.getMessage());
+            log.error("Error tracking results: " + e.getMessage());
             e.printStackTrace();
-        }
-    }
-
-    private List<RaceResult> filterNewResults(List<RaceResult> currentResults) {
-        List<RaceResult> newResults = new ArrayList<>();
-        for (RaceResult webResult : currentResults) {
-            String lookupKey = webResult.time() + "|" + webResult.place();
-            if (!knownResultsCache.contains(lookupKey)) {
-                newResults.add(webResult);
+        } finally {
+            if (doc != null) {
+                doc.empty();
+                doc = null; 
             }
         }
-        return newResults;
     }
 
-    private boolean isWithinRacingHours() {
-        java.time.ZonedDateTime ukTime = java.time.ZonedDateTime.now(java.time.ZoneId.of("Europe/London"));
-        java.time.LocalTime currentTime = ukTime.toLocalTime();
 
-        java.time.LocalTime startWindow = data.getFirstRaceTime();
-        java.time.LocalTime endWindow = data.getLastRaceTime().plusMinutes(30);
+    private void processResults(List<RaceResult> newResults) {
+        log.info("Processing " + newResults.size() + " new results individually...");
 
-        return !currentTime.isBefore(startWindow) && !currentTime.isAfter(endWindow);
+        // Create a tracker list to wait for all submitted tasks in this batch
+        List<CompletableFuture<Void>> tasks = new ArrayList<>();
+
+        for (RaceResult singleResult : newResults) {
+            String payload = DiscordWebhookClient.buildPayload(singleResult);
+
+            // Submit the task and capture its future status
+            CompletableFuture<Void> task = CompletableFuture.runAsync(() -> {
+                try {
+                    HttpRequest req = HttpRequest.newBuilder()
+                            .uri(URI.create(ConfigLoader.getResultsWebhookURL()))
+                            .header("Content-Type", "application/json")
+                            .POST(HttpRequest.BodyPublishers.ofString(payload))
+                            .build();
+
+                    HttpResponse<String> response = SharedHttpClient.getClient()
+                            .send(req, HttpResponse.BodyHandlers.ofString());
+
+                    if (response.statusCode() == 204 || response.statusCode() == 200) {
+                        log.info("Dispatched webhook for result: " + singleResult.time() + " " + singleResult.place());
+
+                        // REMOVED: knownResultsCache.add(...)
+                        // Append directly to the file first; file is our source of truth
+                        RaceResultPersistence.storeSingleResult(singleResult);
+                    } else {
+                        log.error("Discord rejected payload with status " + response.statusCode());
+                    }
+                } catch (Exception e) {
+                    log.error("Error sending/storing result for " + singleResult.place() + ": " + e.getMessage());
+                }
+            }, resultSenderExecutor);
+
+            tasks.add(task);
+
+            try {
+                Thread.sleep(2000); // Simple pacing delay to honor rate limits
+            } catch (InterruptedException ignored) {
+                Thread.currentThread().interrupt();
+            }
+        }
+
+        // Wait for all webhooks and file writes to fully finish
+        try {
+            CompletableFuture.allOf(tasks.toArray(new CompletableFuture[0]))
+                    .get(30, TimeUnit.SECONDS);
+        } catch (Exception e) {
+            log.warn("Timeout or error waiting for webhooks to finish processing: " + e.getMessage());
+        }
+
+        // REMOVED: 'if (synchronizedCache != null)' check
+        // Always refresh your memory cache directly from the storage file data
+        Set<String> synchronizedCache = RaceResultPersistence.pruneStorageFile();
+        knownResultsCache.clear();
+        knownResultsCache.addAll(synchronizedCache);
+        log.info("Cache successfully refreshed from disk storage after processing batch.");
     }
 
     public void stop() {
-        System.out.println("Stopping ResultBotSender scheduler and executors...");
+        log.info("Stopping ResultBotSender scheduler and executors...");
         try {
             scheduler.shutdownNow();
         } catch (Exception ignored) {

@@ -8,11 +8,15 @@ import java.util.List;
 import java.util.Set;
 import java.util.stream.Collectors;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import uk.co.pluckier.discordbot.config.ConfigLoader;
 import uk.co.pluckier.discordbot.model.RaceResult;
-import uk.co.pluckier.discordbot.model.Position;
 
 public class RaceResultPersistence {
+
+    private static final Logger log = LoggerFactory.getLogger(RaceResultPersistence.class);
 
     public static void storeSingleResult(RaceResult result) {
         // 1. Flatten your structured positions list into a simple readable text segment
@@ -30,35 +34,41 @@ public class RaceResultPersistence {
         try (java.io.FileWriter writer = new java.io.FileWriter(ConfigLoader.getStorageFile(), true)) {
             writer.write(newLine + "\n");
         } catch (IOException e) {
-            System.err.println("Local file persistence failed for " + result.time() + ": " + e.getMessage());
+            log.error("Local file persistence failed for " + result.time() + ": " + e.getMessage());
         }
     }
 
     public static Set<String> pruneStorageFile() {
+        Set<String> updatedCacheKeys = new HashSet<>();
         try {
             File file = new File(ConfigLoader.getStorageFile());
-            if (!file.exists())
-                return null;
+            if (!file.exists()) {
+                return updatedCacheKeys; // Return empty set instead of null
+            }
 
             List<String> allLines = Files.readAllLines(file.toPath());
 
-            if (allLines.size() > 150) {
-                List<String> trimmedLines = allLines.subList(allLines.size() - 100, allLines.size());
-                Files.write(file.toPath(), trimmedLines);
-
-                Set<String> updatedCacheKeys = new HashSet<>();
-                for (String line : trimmedLines) {
-                    String[] parts = line.split("\\|", 3);
-                    if (parts.length >= 2) {
-                        updatedCacheKeys.add(parts[0].trim() + "|" + parts[1].trim());
-                    }
-                }
-                System.out.println("Housekeeping complete: Cleaned file and RAM cache bounds safely.");
-                return updatedCacheKeys;
+            // Housekeeping: Trim the file only if it exceeds our threshold
+            if (allLines.size() > 100) {
+                allLines = allLines.subList(allLines.size() - 50, allLines.size());
+                Files.write(file.toPath(), allLines);
+                log.info("Housekeeping complete: Trimmed historical storage file down to 50 entries.");
             }
+
+            // ALWAYS map the active lines to keys, whether we trimmed the file or not!
+            for (String line : allLines) {
+                String[] parts = line.split("\\|", 3);
+                if (parts.length >= 2) {
+                    updatedCacheKeys.add(parts[0].trim() + "|" + parts[1].trim());
+                }
+            }
+
         } catch (IOException e) {
-            System.err.println("Failed to prune historical storage file: " + e.getMessage());
+            log.error("Failed to prune historical storage file: " + e.getMessage());
         }
-        return null;
+
+        // Always returns the true state of the file, never null!
+        return updatedCacheKeys;
     }
+
 }

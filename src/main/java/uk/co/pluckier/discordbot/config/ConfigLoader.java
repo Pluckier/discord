@@ -4,18 +4,22 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.util.Properties;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 public class ConfigLoader {
+    private static final Logger log = LoggerFactory.getLogger(ConfigLoader.class);
     private static final Properties properties = new Properties();
 
     static {
         try (InputStream input = ConfigLoader.class.getClassLoader().getResourceAsStream("config.properties")) {
             if (input == null) {
-                System.err.println("CRITICAL: config.properties not found in resources folder!");
+                log.error("CRITICAL: config.properties not found in resources folder!");
             } else {
                 properties.load(input);
             }
         } catch (IOException ex) {
-            System.err.println("CRITICAL: Failed to read config.properties file!");
+            log.error("CRITICAL: Failed to read config.properties file!");
             ex.printStackTrace();
         }
     }
